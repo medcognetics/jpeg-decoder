@@ -20,7 +20,9 @@ use std::io::Read;
 
 pub const MAX_COMPONENTS: usize = 4;
 
+mod extended;
 mod lossless;
+use self::extended::{compute_image_extended, is_dct_12_bit, stores_coefficients};
 use self::lossless::compute_image_lossless;
 
 #[rustfmt::skip]
@@ -271,13 +273,17 @@ impl<R: Read> Decoder<R> {
     /// This efficiently scales the image by the smallest supported scale
     /// factor that produces an image larger than or equal to the requested
     /// size in at least one axis. The currently implemented scale factors
-    /// are 1/8, 1/4, 1/2 and 1.
+    /// are 1/8, 1/4, 1/2 and 1. 12-bit DCT images are always decoded at
+    /// full size.
     ///
     /// To generate a thumbnail of an exact size, pass the desired size and
     /// then scale to the final size using a traditional resampling algorithm.
     pub fn scale(&mut self, requested_width: u16, requested_height: u16) -> Result<(u16, u16)> {
         self.read_info()?;
         let frame = self.frame.as_mut().unwrap();
+        if is_dct_12_bit(frame) {
+            return Ok((frame.output_size.width, frame.output_size.height));
+        }
         let idct_size = crate::idct::choose_idct_size(
             frame.image_size,
             Dimensions {
@@ -355,7 +361,11 @@ impl<R: Read> Decoder<R> {
                             UnsupportedFeature::ArithmeticEntropyCoding,
                         ));
                     }
-                    if frame.precision != 8 && frame.coding_process != CodingProcess::Lossless {
+                    // 12-bit DCT decoding is implemented for single-component images only.
+                    if frame.precision != 8
+                        && frame.coding_process != CodingProcess::Lossless
+                        && !(frame.precision == 12 && component_count == 1)
+                    {
                         return Err(Error::Unsupported(UnsupportedFeature::SamplePrecision(
                             frame.precision,
                         )));
@@ -397,9 +407,7 @@ impl<R: Read> Decoder<R> {
                     let frame = self.frame.clone().unwrap();
                     let scan = parse_sos(&mut self.reader, &frame)?;
 
-                    if frame.coding_process == CodingProcess::DctProgressive
-                        && self.coefficients.is_empty()
-                    {
+                    if stores_coefficients(&frame) && self.coefficients.is_empty() {
                         self.coefficients = frame
                             .components
                             .iter()
@@ -452,6 +460,12 @@ impl<R: Read> Decoder<R> {
                                     *component_finished = true;
                                 }
                             }
+                        }
+
+                        // 12-bit coefficients are kept until the end of the image and
+                        // are never sent to the 8-bit workers.
+                        if is_dct_12_bit(&frame) {
+                            finished = [false; MAX_COMPONENTS];
                         }
 
                         let preference =
@@ -638,6 +652,10 @@ impl<R: Read> Decoder<R> {
             return Err(Error::Format(
                 "size of decoded image exceeds maximum allowed size".to_owned(),
             ));
+        }
+
+        if is_dct_12_bit(frame) {
+            return compute_image_extended(frame, &self.coefficients, &self.quantization_tables);
         }
 
         // If we're decoding a progressive jpeg and a component is unfinished, render what we've got
@@ -861,6 +879,7 @@ impl<R: Read> Decoder<R> {
         }
 
         let is_progressive = frame.coding_process == CodingProcess::DctProgressive;
+        let stores_coefficients = stores_coefficients(frame);
         let is_interleaved = components.len() > 1;
         let mut dummy_block = [0i16; 64];
         let mut huffman = HuffmanDecoder::new();
@@ -958,7 +977,7 @@ impl<R: Read> Decoder<R> {
                 for (i, component) in components.iter().enumerate() {
                     for v_pos in 0..mcu_vertical_samples[i] {
                         for h_pos in 0..mcu_horizontal_samples[i] {
-                            let coefficients = if is_progressive {
+                            let coefficients = if stores_coefficients {
                                 let block_y = (mcu_y * mcu_vertical_samples[i] + v_pos) as usize;
                                 let block_x = (mcu_x * mcu_horizontal_samples[i] + h_pos) as usize;
                                 let block_offset =
@@ -998,6 +1017,7 @@ impl<R: Read> Decoder<R> {
                                     scan.successive_approximation_low,
                                     &mut eob_run,
                                     &mut dc_predictors[i],
+                                    frame.precision,
                                 )?;
                             } else {
                                 decode_block_successive_approximation(
@@ -1093,8 +1113,11 @@ fn decode_block<R: Read>(
     successive_approximation_low: u8,
     eob_run: &mut u16,
     dc_predictor: &mut i16,
+    precision: u8,
 ) -> Result<()> {
     debug_assert_eq!(coefficients.len(), 64);
+    // Section F.1.2.1.1, Table F.1: DC difference categories run to precision + 3.
+    let max_dc_category = precision + 3;
 
     if spectral_selection.start == 0 {
         // Section F.2.2.1
@@ -1102,7 +1125,7 @@ fn decode_block<R: Read>(
         let value = huffman.decode(reader, dc_table.unwrap())?;
         let diff = match value {
             0 => 0,
-            1..=11 => huffman.receive_extend(reader, value)?,
+            1..=15 if value <= max_dc_category => huffman.receive_extend(reader, value)?,
             _ => {
                 // Section F.1.2.1.1
                 // Table F.1

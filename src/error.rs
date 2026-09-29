@@ -18,7 +18,8 @@ pub enum UnsupportedFeature {
     Hierarchical,
     /// JPEG using arithmetic entropy coding instead of Huffman coding.
     ArithmeticEntropyCoding,
-    /// Sample precision in bits. 8 bit sample precision is what is currently supported in non-lossless coding process.
+    /// Sample precision in bits. Non-lossless coding processes support 8 bit precision, and 12 bit
+    /// precision for single-component images.
     SamplePrecision(u8),
     /// Number of components in an image. 1, 3 and 4 components are currently supported.
     ComponentCount(u8),

@@ -2,6 +2,11 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- Decode 12-bit single-component DCT images (extended sequential and progressive) as `L16`.
+- Accept DC difference categories up to 15 for 12-bit precision.
+
 ## v0.3.2 (2025-06-15)
 
 - Depend on wasm-bindgen 0.2.89 or higher

@@ -24,6 +24,48 @@ fn reftest_scaled() {
     reftest_scaled_file(&base.join("rgb.jpg"), 63,  42,  &base.join("rgb_63x42.png"));
 }
 
+#[test]
+fn reftest_extended_12_bit() {
+    // libjpeg-turbo's integer IDCT made the references. Allow one level of IDCT rounding.
+    let base = Path::new("tests").join("reftest").join("images").join("extended12");
+    let files = common::test_files(&base);
+    assert_eq!(files.len(), 6);
+
+    for path in &files {
+        let mut decoder = jpeg::Decoder::new(File::open(path).unwrap());
+        let data = decoder.decode().expect(&format!("failed to decode file: {:?}", path));
+        let info = decoder.info().unwrap();
+        assert_eq!(info.pixel_format, jpeg::PixelFormat::L16);
+
+        let mut reference = png::Decoder::new(File::open(path.with_extension("png")).unwrap());
+        reference.set_transformations(png::Transformations::EXPAND);
+        let (ref_info, mut ref_reader) = reference.read_info().unwrap();
+        assert_eq!((ref_info.width, ref_info.height), (info.width as u32, info.height as u32));
+        let mut ref_data = vec![0; ref_info.buffer_size()];
+        ref_reader.next_frame(&mut ref_data).unwrap();
+
+        let samples = data.chunks_exact(2).map(|a| u16::from_ne_bytes([a[0], a[1]]));
+        let expected = ref_data.chunks_exact(2).map(|a| u16::from_be_bytes([a[0], a[1]]));
+        assert_eq!(data.len(), ref_data.len());
+        let max_diff = samples
+            .zip(expected)
+            .map(|(a, b)| (a as i32 - b as i32).abs())
+            .max()
+            .unwrap();
+        assert!(max_diff <= 1, "{:?}: maximum difference was {}", path, max_diff);
+    }
+}
+
+#[test]
+fn extended_12_bit_color_is_unsupported() {
+    let path = Path::new("tests").join("reftest").join("unsupported").join("extended12_rgb_37x23.jpg");
+    let mut decoder = jpeg::Decoder::new(File::open(path).unwrap());
+    match decoder.decode() {
+        Err(jpeg::Error::Unsupported(jpeg::UnsupportedFeature::SamplePrecision(12))) => {}
+        other => panic!("expected unsupported 12-bit precision, got {:?}", other.map(|data| data.len())),
+    }
+}
+
 fn reftest_file(path: &Path) {
     let file = File::open(path).unwrap();
     let decoder = jpeg::Decoder::new(file);
